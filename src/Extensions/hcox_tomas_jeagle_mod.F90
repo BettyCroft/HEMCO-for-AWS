@@ -67,6 +67,7 @@ MODULE HCOX_TOMAS_Jeagle_Mod
    INTEGER,  ALLOCATABLE :: HcoIDs    (:      )    ! HEMCO species ID's
    REAL(dp), POINTER     :: TOMAS_DBIN(:      )    ! TOMAS bin width
    REAL(dp), POINTER     :: DRFAC     (:      )    ! TOMAS area?
+   REAL(dp), POINTER     :: OFFLINE_MFAC(:      )  ! scale the offline emissions into bins
    REAL(dp), POINTER     :: TC1       (:,:,:,:)    ! Aerosol mass
    REAL(dp), POINTER     :: TC2       (:,:,:,:)    ! Aerosol number
    LOGICAL               :: ColdSST                ! Flag to correct SSA emissions over cold waters
@@ -220,6 +221,8 @@ CONTAINS
     CHARACTER(LEN=31)      :: FLDNME
     INTEGER                :: NDAYS!, cYYYY, cMM, cDD, K                                                                                 
     REAL(hp), TARGET       :: MULTI(HcoState%NX,HcoState%NY)
+    REAL(hp), TARGET       :: SALA_OFFLINE(HcoState%NX,HcoState%NY)
+    REAL(hp), TARGET       :: SALC_OFFLINE(HcoState%NX,HcoState%NY)
     REAL(hp), TARGET       :: SNOWSALA  (HcoState%NX,HcoState%NY)
     REAL(hp), TARGET       :: SNOWSALC  (HcoState%NX,HcoState%NY)
 
@@ -260,9 +263,26 @@ CONTAINS
        RETURN
     ENDIF
 
-    !INIT VALUES
+    !INIT VALUES  ? do we need this here
     Inst%TC1 = 0.0_hp
     Inst%TC2 = 0.0_hp
+
+    !!!betty - can add an if for offline switch later
+      CALL HCO_EvalFld ( HcoState, 'SEASALT_SALA', SALA_OFFLINE, RC )
+      IF ( RC /= HCO_SUCCESS ) THEN
+          WRITE(MSG,*) 'Cannot find OFFLINE SALA'
+          !CALL HCO_ERROR(HcoState%Config%Err, MSG, RC)
+          CALL HCO_ERROR(MSG, RC )
+          RETURN
+      ENDIF
+      CALL HCO_EvalFld ( HcoState, 'SEASALT_SALC', SALC_OFFLINE, RC )
+      IF ( RC /= HCO_SUCCESS ) THEN
+          WRITE(MSG,*) 'Cannot find OFFLINE SALC'
+          !CALL HCO_ERROR(HcoState%Config%Err, MSG, RC)
+          CALL HCO_ERROR(MSG, RC )
+          RETURN
+      ENDIF
+
 
     IF ( Inst%EmitSnowSS ) THEN
       ! Read in distribution of multi-year sea ice from                                                      
@@ -438,30 +458,44 @@ CONTAINS
           !---------------------------------------------------------------
           DO K = 1, HcoState%MicroPhys%nBins
              rwet=Inst%TOMAS_DBIN(k)*1.0E6*BETHA/2. ! convert from dry diameter [m] to wet (80% RH) radius [um]
-         ! jkodros - testing out BETHA 7/29/15
-             if (rwet > 0.d0) then
-                  A=4.7*(1.+30.*rwet)**(-0.017*rwet**(-1.44))
-                  B=(0.433-log10(rwet))/0.433
+!         ! jkodros - testing out BETHA 7/29/15
+!             if (rwet > 0.d0) then
+!                  A=4.7*(1.+30.*rwet)**(-0.017*rwet**(-1.44))
+!                  B=(0.433-log10(rwet))/0.433
+!                  dfo=1.373*W10M**3.41*rwet**(-1.*A)  & !m-2 um-1 s-1
+!                    *(1.+0.057*rwet**3.45)*10.**(1.607*exp(-1.*B**2))
+!                 ! print*,'here is r wet and A B',rwet, A, B,dfo
+!             else
+!
+!                  dfo=0.d0
+!             endif
+!
+!             dfo=dfo*Inst%DRFAC(k)*BETHA  !hemco units???? jkodros (?m-2 s-1)
+!
+!             !dfo=dfo*focean*SCALE  ! scale now includes ocean fraction - remove this line
+!             dfo=dfo*SCALE  ! note: scale now includes ocean fraction
 
-                  dfo=1.373*W10M**3.41*rwet**(-1.*A)  & !m-2 um-1 s-1
-                    *(1.+0.057*rwet**3.45)*10.**(1.607*exp(-1.*B**2))
+             !print*,'Original dfo', dfo, K
 
-             else
+              ! test an overwrite with the offline values - use 0.6361 to remove mass from 11-16 um
+             ! units should be um-1 m-2 s-1  or m-2 s-1 ???
+!!!! ----- do we need to include  the ocean fraction
+             !  - the offline sea salt is in kg/m2/s - we can convert  to #/m2/s
+             ! --- SALA_OFFLINE is the name here for SEASALT_SALA - take only 0.6
+                   dfo   = 0.5923d0*(SALA_OFFLINE(I,J) + SALC_OFFLINE(I,J)) &
+                           *Inst%OFFLINE_MFAC(k)   &
+                          / SQRT( HcoState%MicroPhys%BinBound(K  ) *    &
+                                  HcoState%MicroPhys%BinBound(K+1)   )
 
-                  dfo=0.d0
-             endif
-
-             dfo=dfo*Inst%DRFAC(k)*BETHA  !hemco units???? jkodros (?m-2 s-1)
-
-             !dfo=dfo*focean*SCALE  ! scale now includes ocean fraction - remove this line
-             dfo=dfo*SCALE  ! note: scale now includes ocean fraction
+             !print*, 'New dfo',dfo, K
 
              ! Loop thru the boundary layer
              DO L = 1, HcoState%Nz
 
                 ! Fraction of the PBL spanned by box (I,J,L) [unitless]
                 FEMIS = ExtState%FRAC_OF_PBL%Arr%Val(I,J,L)
-
+                    !print*,'FEMIS is ', FEMIS,I,J,L
+                
                 ! Only handle grid boxes w/in the boundary layer
                 IF ( FEMIS > 0d0 ) THEN
 
@@ -476,7 +510,7 @@ CONTAINS
                    !if (K > 3 ) THEN
                    NUMBER = FEMIS* (dfo  + & 
                       (( QSNOWICE_FYI * SUM( Inst%F_DN_S_FYI(:,K) ) + &
-                         QSNOWICE_MYI * SUM( Inst%F_DN_S_MYI(:,K) ) ) * DDSNOW))
+                      QSNOWICE_MYI * SUM( Inst%F_DN_S_MYI(:,K) ) ) * DDSNOW))
 
                    !NUMBER = FEMIS* (dfo)  + FEMIS* ( & 
                    !   (( QSNOWICE_FYI * SUM( Inst%F_DI_S_FYI(:,K) ) + &
@@ -514,15 +548,15 @@ CONTAINS
                    Inst%TC1(I,J,L,K) = NUMBER
                    Inst%TC2(I,J,L,K) = MASS
 
-                ENDIF
-             ENDDO
-          ENDDO
+                ENDIF  % end femis
+             ENDDO    % levels
+          ENDDO    %bins
        !ELSE  ! move initialization to start of loop
        !   Inst%TC1(I,J,:,:) = 0d0
        !   Inst%TC2(I,J,:,:) = 0d0
        !ENDIF
-    ENDDO
-    ENDDO
+    ENDDO  !NX
+    ENDDO  !NY
 
     !### Debug
     !print*, 'JACK SEASALT EMISSIONS AT 50, 10,7: ', TC2(ii,jj,1,7)
@@ -857,6 +891,15 @@ CONTAINS
        RETURN
     ENDIF
 
+    ! Allocate TOMAS_A
+    ALLOCATE ( Inst%OFFLINE_MFAC( HcoState%MicroPhys%nBins ), STAT=RC )
+    IF ( RC /= HCO_SUCCESS ) THEN
+       MSG = 'Cannot allocate OFFLINE_MFAC array (hcox_tomas_jeagle_mod.F90)'
+       !CALL HCO_ERROR(HcoState%Config%Err,MSG, RC )
+       CALL HCO_ERROR(MSG, RC )
+       RETURN
+    ENDIF
+
     ! JKODROS - ALLOCATE TC1 and TC2
     ALLOCATE ( Inst%TC1( HcoState%NX, HcoState%NY,&
                HcoState%NZ, HcoState%MicroPhys%nBins ), STAT=RC )
@@ -1018,6 +1061,21 @@ CONTAINS
           2.84132d-03,   4.51031d-03,    7.15968d-03,     1.13653d-02,   &
           1.80413d-02,   2.86387d-02,    4.54612d-02,     7.21651d-02,   &
           1.14555d-01,   1.81845d-01,    1.06874d+00,     3.39304d+00 /)
+
+!        Inst%OFFLINE_NFAC= (/0.1241d-00,    0.1105d-00,   0.0985d-00,   &
+!          0.0877d-00,   0.0782d-00,    0.0696d-00,     0.0620d-00,   &
+!          0.0553d-00,   0.0492d-00,    0.0439d-00,     0.0391d-00,   &
+!          0.0348d-00,   0.0310d-00,    0.0663d-00,     0.0497d-00 /)
+
+!        Inst%OFFLINE_MFAC= (/3.9366d-10, 1.4028d-09,   4.9990d-09,   &
+!          1.7814d-08,   6.3483d-08,    2.2623d-07,     8.0618d-07,   &
+!          2.8729d-06,   1.0238d-05,    3.6483d-05,     1.3001d-04,   &
+!          4.6331d-04,   1.6511d-03,    3.9952d-02,     9.5775d-01 /)
+
+            Inst%OFFLINE_MFAC= (/0.d0, 0.d0,   0.d0,   &
+          4.4474d-10,   7.3816d-09,    1.5897d-07,     3.4673d-06,   &
+          5.3828d-05,   4.4433d-04,    1.754d-03,      3.756d-03,   &
+          6.039d-03,    1.2007d-02,    3.1428d-01,     6.616d-01 /)
 
 #elif defined( TOMAS40 )
 
@@ -1349,6 +1407,7 @@ CONTAINS
 
           IF ( ASSOCIATED( Inst%TOMAS_DBIN ) ) DEALLOCATE( Inst%TOMAS_DBIN )
           IF ( ASSOCIATED( Inst%DRFAC      ) ) DEALLOCATE( Inst%DRFAC      )
+          IF ( ASSOCIATED( Inst%OFFLINE_MFAC) ) DEALLOCATE( Inst%OFFLINE_MFAC)
           IF ( ASSOCIATED( Inst%TC1        ) ) DEALLOCATE( Inst%TC1        )
           IF ( ASSOCIATED( Inst%TC2        ) ) DEALLOCATE( Inst%TC2        )
           IF ( ALLOCATED ( Inst%HcoIDs     ) ) DEALLOCATE( Inst%HcoIDs     )
