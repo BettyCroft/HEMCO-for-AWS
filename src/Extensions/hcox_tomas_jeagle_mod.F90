@@ -548,9 +548,9 @@ CONTAINS
                    Inst%TC1(I,J,L,K) = NUMBER
                    Inst%TC2(I,J,L,K) = MASS
 
-                ENDIF  % end femis
-             ENDDO    % levels
-          ENDDO    %bins
+                ENDIF  ! end femis
+             ENDDO    ! levels
+          ENDDO    !bins
        !ELSE  ! move initialization to start of loop
        !   Inst%TC1(I,J,:,:) = 0d0
        !   Inst%TC2(I,J,:,:) = 0d0
